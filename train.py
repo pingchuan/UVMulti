@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from models.utils.metrics_seg_enh import EnhancementMetrics, StreamSegMetrics
 import numpy as np
 import random
-from option_uvmulti import MonodepthOptions
+from option import MonodepthOptions
 
 splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 options = MonodepthOptions()
