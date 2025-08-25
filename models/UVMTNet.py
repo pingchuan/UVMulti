@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.functional import feature_alpha_dropout
 import torchvision.models as models
-#from depth_decoder_QTR import Depth_Decoder_QueryTr
+from models.depth_decoder_QTR import Depth_Decoder_QueryTr
 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
@@ -337,7 +337,834 @@ class ECAAttention(nn.Module):
         out = self.sigmoid(x)
 
         return out
+class FEDS3(nn.Module):
+    def __init__(self, in_channels, out_channels_F2):
+        super(FEDS3, self).__init__()
 
+        # F1 和 F2 的交叉注意力
+        #self.fc_F1 = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
+        # F1' 和 F2 计算注意力
+        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
+
+        # F3 的处理
+        #self.fc_F3 = nn.Linear(in_channels, in_channels)
+        self.dwconv_F3 = DwConv(in_channels, in_channels)
+        self.dwconv_F2 = DwConv(in_channels, in_channels)
+        self.dwconv_F1 = DwConv(in_channels, in_channels)
+        # 最后的融合
+        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
+        self.conv_out = nn.Conv2d(in_channels*2, out_channels_F2, kernel_size=3, padding=1)
+        self.bn = nn.BatchNorm2d(out_channels_F2)
+        #self.prelu = nn.PReLU()
+        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        self.selu = nn.SELU()
+    def forward(self, F1, F2, F3):
+        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
+        g1 = self.sigmoid(self.gv1(F2))
+        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
+
+        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
+        F1_prime =self.dwconv_F1(F1_prime)
+        #Fa = F1_prime
+        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
+        #F1_prime_linear = self.fc_F1(F1_prime)
+        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
+        #F2_v = self.fc_F2_v(F2)
+        # 使用 Transformer 注意力机制
+
+
+        # Step 3: F3 经过线性层和 DwConv 得到 F3'
+        #F3_linear = self.fc_F3(F3)
+        F3_prime = self.dwconv_F3(F3)
+        F2_prime = self.dwconv_F2(F2)
+        Fa = self.attention_block_F1_F2(F3_prime, F2_prime)
+        # Step 4: F2 与 F3' 点乘得到 Fb
+        #F2_F3 = self.fc_F2_F3(F2)
+        #Fb = F2 * F1_prime +F2
+        Fb = F2 * F1_prime
+        # Step 5: 拼接 Fa 和 Fb
+        #fused_features = torch.cat([Fa, Fb], dim=1)
+        batch_size, channels, height, width = Fa.size()
+
+        # 创建一个新的张量来保存交替拼接后的结果
+        fused_features = torch.empty(batch_size, 2 * channels, height, width, device=Fa.device)
+
+        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
+        fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
+        fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
+        # Step 6: 最后的卷积操作
+        out = self.conv_out(fused_features)
+
+        out = out*(1-g1)+F2*g1
+        #out = self.conv_out(Fb)
+        out = self.bn(out)
+        out = self.selu(out)
+
+        return out
+
+class FEDS4(nn.Module):
+    def __init__(self, in_channels, out_channels_F2):
+        super(FEDS4, self).__init__()
+
+        # F1 和 F2 的交叉注意力
+        #self.fc_F1 = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
+        # F1' 和 F2 计算注意力
+        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
+
+        # F3 的处理
+        #self.fc_F3 = nn.Linear(in_channels, in_channels)
+        self.dwconv_F3 = DwConv(in_channels, in_channels)
+        self.dwconv_F2 = DwConv(in_channels, in_channels)
+        self.dwconv_F1 = DwConv(in_channels, in_channels)
+        # 最后的融合
+        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
+        self.conv_out = nn.Conv2d(in_channels*2, out_channels_F2, kernel_size=3, padding=1)
+        #self.bn = nn.BatchNorm2d(out_channels_F2)
+        #self.prelu = nn.PReLU()
+        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        #self.selu = nn.SELU()
+    def forward(self, F1, F2, F3):
+        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
+        g1 = self.sigmoid(self.gv1(F2))
+        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
+
+        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
+        F1_prime =self.dwconv_F1(F1_prime)
+        #Fa = F1_prime
+        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
+        #F1_prime_linear = self.fc_F1(F1_prime)
+        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
+        #F2_v = self.fc_F2_v(F2)
+        # 使用 Transformer 注意力机制
+
+
+        # Step 3: F3 经过线性层和 DwConv 得到 F3'
+        #F3_linear = self.fc_F3(F3)
+        F3_prime = self.dwconv_F3(F3)
+        F2_prime = self.dwconv_F2(F2)
+        Fa = self.attention_block_F1_F2(F3_prime, F2_prime)
+        # Step 4: F2 与 F3' 点乘得到 Fb
+        #F2_F3 = self.fc_F2_F3(F2)
+        #Fb = F2 * F1_prime +F2
+        Fb = F2 * F1_prime
+        # Step 5: 拼接 Fa 和 Fb
+        #fused_features = torch.cat([Fa, Fb], dim=1)
+        batch_size, channels, height, width = Fa.size()
+
+        # 创建一个新的张量来保存交替拼接后的结果
+        fused_features = torch.cat([Fa, Fb], dim=1)
+
+        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
+        #fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
+        #fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
+        # Step 6: 最后的卷积操作
+        out = self.conv_out(fused_features)
+
+        out = out*(1-g1)+F2*g1
+        #out = self.conv_out(Fb)
+
+
+        return out
+
+class FEDS5(nn.Module):
+    def __init__(self, in_channels, out_channels_F2):
+        super(FEDS5, self).__init__()
+
+        # F1 和 F2 的交叉注意力
+        #self.fc_F1 = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
+        # F1' 和 F2 计算注意力
+        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
+
+        # F3 的处理
+        #self.fc_F3 = nn.Linear(in_channels, in_channels)
+        self.dwconv_F3 = DwConv(in_channels, in_channels)
+        self.dwconv_F2 = DwConv(in_channels, in_channels)
+        self.dwconv_F1 = DwConv(in_channels, in_channels)
+        self.dwconv_b = DwConv(in_channels, in_channels)
+        # 最后的融合
+        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
+        self.conv_out = nn.Conv2d(in_channels*3, out_channels_F2, kernel_size=3, padding=1)
+        #self.bn = nn.BatchNorm2d(out_channels_F2)
+        #self.prelu = nn.PReLU()
+        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        #self.selu = nn.SELU()
+    def forward(self, F1, F2, F3):
+        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
+        g1 = self.sigmoid(self.gv1(F2))
+        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
+        F2_b = self.dwconv_b(F2)
+        F2_b = F2_b * F2
+
+        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
+        F1_prime =self.dwconv_F1(F1_prime)
+        #Fa = F1_primef
+        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
+        #F1_prime_linear = self.fc_F1(F1_prime)
+        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
+        #F2_v = self.fc_F2_v(F2)
+        # 使用 Transformer 注意力机制
+
+
+        # Step 3: F3 经过线性层和 DwConv 得到 F3'
+        #F3_linear = self.fc_F3(F3)
+        F3_prime = self.dwconv_F3(F3)
+        F2_prime = self.dwconv_F2(F2)
+        Fa = self.attention_block_F1_F2(F3_prime, F2_prime)
+        # Step 4: F2 与 F3' 点乘得到 Fb
+        #F2_F3 = self.fc_F2_F3(F2)
+        #Fb = F2 * F1_prime +F2
+        Fb = F2 * F1_prime
+        # Step 5: 拼接 Fa 和 Fb
+        #fused_features = torch.cat([Fa, Fb], dim=1)
+        batch_size, channels, height, width = Fa.size()
+
+        # 创建一个新的张量来保存交替拼接后的结果
+        fused_features = torch.cat([Fa, Fb,F2_b], dim=1)
+
+        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
+        #fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
+        #fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
+        # Step 6: 最后的卷积操作
+        out = self.conv_out(fused_features)
+
+        out = out*(1-g1)+F2*g1
+        #out = self.conv_out(Fb)
+
+
+        return out
+
+
+class FEDS6(nn.Module):
+    def __init__(self, in_channels, out_channels_F2):
+        super(FEDS6, self).__init__()
+
+        # F1 和 F2 的交叉注意力
+        #self.fc_F1 = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
+        # F1' 和 F2 计算注意力
+        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
+
+        # F3 的处理
+        #self.fc_F3 = nn.Linear(in_channels, in_channels)
+        #self.dwconv_F3 = DwConv(in_channels, in_channels)
+        #self.dwconv_F2 = DwConv(in_channels, in_channels)
+        self.dwconv_F1 = DwConv(in_channels, in_channels)
+        self.dwconv_b = DwConv(in_channels, in_channels)
+        # 最后的融合
+        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
+        self.conv_out = nn.Conv2d(in_channels*3, out_channels_F2, kernel_size=3, padding=1)
+        #self.bn = nn.BatchNorm2d(out_channels_F2)
+        #self.prelu = nn.PReLU()
+        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        #self.selu = nn.SELU()
+    def forward(self, F1, F2, F3):
+        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
+        g1 = self.sigmoid(self.gv1(F2))
+        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
+        F2_b = self.dwconv_b(F2)
+        F2_b = F2_b * F2
+
+        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
+        F1_prime =self.dwconv_F1(F1_prime)
+        #Fa = F1_primef
+        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
+        #F1_prime_linear = self.fc_F1(F1_prime)
+        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
+        #F2_v = self.fc_F2_v(F2)
+        # 使用 Transformer 注意力机制
+
+
+        # Step 3: F3 经过线性层和 DwConv 得到 F3'
+        #F3_linear = self.fc_F3(F3)
+        #F3_prime = self.dwconv_F3(F3)
+        #F2_prime = self.dwconv_F2(F2)
+        Fa = self.attention_block_F1_F2(F3, F2)
+        # Step 4: F2 与 F3' 点乘得到 Fb
+        #F2_F3 = self.fc_F2_F3(F2)
+        #Fb = F2 * F1_prime +F2
+        Fb = F2 * F1_prime
+        # Step 5: 拼接 Fa 和 Fb
+        #fused_features = torch.cat([Fa, Fb], dim=1)
+        batch_size, channels, height, width = Fa.size()
+
+        # 创建一个新的张量来保存交替拼接后的结果
+        fused_features = torch.cat([Fa, Fb,F2_b], dim=1)
+
+        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
+        #fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
+        #fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
+        # Step 6: 最后的卷积操作
+        out = self.conv_out(fused_features)
+
+        out = out*(1-g1)+F2*g1
+        #out = self.conv_out(Fb)
+
+
+        return out
+
+class EncoderD_1(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD_1, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+
+        #self.tsg = TSG2(in_channels=512)
+        self.tsg = TSG_1(in_channels=512)
+        self.fe1 = MSIE1(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = MSIE1(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = MSIE1(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5_e)
+        # print(d_e.shape)
+        self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5_s)
+        self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        #d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
+
+class EncoderD_2(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD_2, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+
+        #self.tsg = TSG2(in_channels=512)
+        self.tsg = TSG_2(in_channels=512)
+        self.fe1 = MSIE1(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = MSIE1(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = MSIE1(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5_e)
+        # print(d_e.shape)
+        self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5_s)
+        self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        #d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
+
+
+class CFR1(nn.Module):
+    def __init__(self, in_channels, out_channels_F2):
+        super(CFR1, self).__init__()
+
+        # F1 和 F2 的交叉注意力
+        #self.fc_F1 = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
+        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
+        # F1' 和 F2 计算注意力
+        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
+
+        # F3 的处理
+        #self.fc_F3 = nn.Linear(in_channels, in_channels)
+        self.dwconv_F3 = DwConv(in_channels, in_channels)
+        self.dwconv_F2 = DwConv(in_channels, in_channels)
+        self.dwconv_F1 = DwConv(in_channels, in_channels)
+        self.dwconv_b = DwConv(in_channels, in_channels)
+        # 最后的融合
+        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
+        self.conv_out = nn.Conv2d(in_channels*3, out_channels_F2, kernel_size=3, padding=1)
+        #self.bn = nn.BatchNorm2d(out_channels_F2)
+        #self.prelu = nn.PReLU()
+        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        #self.selu = nn.SELU()
+    def forward(self, F1, F2, F3):
+        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
+        g1 = self.sigmoid(self.gv1(F2))
+        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
+        F2_b = self.dwconv_b(F2)
+        F2_b = F2_b * F2
+
+        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
+        F1_prime =self.dwconv_F1(F1_prime)
+        #Fa = F1_primef
+        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
+        #F1_prime_linear = self.fc_F1(F1_prime)
+        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
+        #F2_v = self.fc_F2_v(F2)
+        # 使用 Transformer 注意力机制
+
+
+        # Step 3: F3 经过线性层和 DwConv 得到 F3'
+        #F3_linear = self.fc_F3(F3)
+        F3_prime = self.dwconv_F3(F3)
+        F2_prime = self.dwconv_F2(F2)
+        Fa = self.attention_block_F1_F2(F3_prime, F2_prime)
+        # Step 4: F2 与 F3' 点乘得到 Fb
+        #F2_F3 = self.fc_F2_F3(F2)
+        #Fb = F2 * F1_prime +F2
+        Fb = F2 * F1_prime
+        # Step 5: 拼接 Fa 和 Fb
+        #fused_features = torch.cat([Fa, Fb], dim=1)
+        batch_size, channels, height, width = Fa.size()
+
+        # 创建一个新的张量来保存交替拼接后的结果
+        fused_features = torch.cat([Fa, F2_b, Fb], dim=1)
+
+        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
+        #fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
+        #fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
+        # Step 6: 最后的卷积操作
+        out = self.conv_out(fused_features)
+
+        out = out*(1-g1)+F2*g1
+        #out = self.conv_out(Fb)
+
+
+        return out
+class FE1(nn.Module):
+    def __init__(self, in_channels_F1, in_channels_F2, in_channels_F3):
+        super(FE1, self).__init__()
+
+        # 通道注意力
+
+
+        # 1x1卷积用于F1'
+        self.conv_F1 = nn.Conv2d(in_channels_F1, in_channels_F1, kernel_size=1)
+        self.channel = in_channels_F2
+        # 两次3x3卷积用于F3'
+        #self.conv_F3_1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=3, padding=1)
+        #self.conv_F3_2 = nn.Conv2d(in_channels_F3, in_channels_F3//2, kernel_size=3, padding=1)
+        #self.deconv = nn.ConvTranspose2d(
+         #   in_channels_F3, in_channels_F3//2, kernel_size=3, stride=1, padding=1)
+        # 通道注意力用于融合后的特征
+        self.final_ca = ECAAttention1(in_channels_F2)
+        self.conv = nn.Conv2d(self.channel,self.channel//2, kernel_size=3, padding=1)
+        # 最终降维卷积
+        self.final_conv = nn.Conv2d(in_channels_F1 + in_channels_F3, in_channels_F2, kernel_size=3, padding=1)
+        self.prelu = nn.PReLU(in_channels_F2)  # PReLU激活函数
+        self.patchnorm = nn.BatchNorm2d(in_channels_F2)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dw_conv1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=1, padding=0, groups=in_channels_F3)
+        self.bn1 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv1
+
+        self.dw_conv2 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=7, padding=3, groups=in_channels_F3)
+        self.bn2 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv2
+
+        self.bnf = nn.BatchNorm2d(in_channels_F2)  # Batch Normalization after dw_conv2
+        #self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.SELU()
+
+    def forward(self, F1, F2, F3):
+        # Step 1: Extract high-frequency features from F1
+        F1_avg = F.adaptive_avg_pool2d(F1, (1, 1))  # Global average pooling
+        F1_up = F.interpolate(F1_avg, size=F1.shape[2:], mode='bilinear', align_corners=False)  # 上采样
+        F1_high_freq = F1 - F1_up  # F1的高频特征
+
+
+
+        # Step 3: Process F1' and F3' for feature fusion
+        F1_processed = self.conv_F1(F1_high_freq)  # 对F1'进行1x1卷积
+        F1_processed = F.interpolate(F1_processed, scale_factor=0.5, mode='bilinear', align_corners=False)  # 下采样
+
+        #F3_processed = self.conv_F3_1(F3)  # 对F3'进行第一次3x3卷积
+        #F3_processed = self.conv_F3_2(F3_processed)  # 对F3'进行第二次3x3卷积
+        F3_p1 = self.dw_conv1(F3)
+        F3_p1 = self.bn1(F3_p1)
+        F3_p2 = self.dw_conv2(F3)
+        F3_p2 = self.bn2(F3_p2)
+        F3_processed = F.interpolate(F3_p2+F3_p1, scale_factor=2, mode='bilinear', align_corners=False)  # 上采样
+        #F3_processed = self.deconv(F3)
+        # Step 4: Concatenate F1' and F3' after processing
+        fused_features = torch.cat([F1_processed, F3_processed], dim=1)
+
+        fused_features = self.final_conv(fused_features)
+        fused_features = self.patchnorm(fused_features)
+        fused_features = self.prelu(fused_features)
+
+        # Step 6: Split the channels into two halves and process
+        half_C = self.channel // 2
+        f1_first_half = fused_features[:, :half_C, :, :]
+        f2_first_half = F2[:, :half_C, :, :]
+
+        # 前一半通道相加
+        fused_first_half = f1_first_half + f2_first_half
+
+        # 后一半通道拼接
+        f1_second_half = fused_features[:, half_C:, :, :]
+        f2_second_half = F2[:, half_C:, :, :]
+        concatenated_second_half = torch.cat([f1_second_half, f2_second_half], dim=1)
+
+        # 卷积操作
+        concatenated_second_half = self.conv(concatenated_second_half)
+
+        # Step 7: 合并处理后的特征
+        fused_features = F2 + torch.cat([fused_first_half, concatenated_second_half], dim=1)
+        # Step 6: Final convolution to match the output channels of F2
+        out = self.final_ca(fused_features)
+
+        # Step 7: Add the enhanced features with F2
+        out = out + F2
+
+        return self.relu(self.bnf(out))
+
+
+class FE2(nn.Module):
+    def __init__(self, in_channels_F1, in_channels_F2, in_channels_F3):
+        super(FE2, self).__init__()
+
+        # 通道注意力
+
+
+        # 1x1卷积用于F1'
+        self.conv_F1 = nn.Conv2d(in_channels_F1, in_channels_F1, kernel_size=1)
+        self.channel = in_channels_F2
+        # 两次3x3卷积用于F3'
+        #self.conv_F3_1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=3, padding=1)
+        #self.conv_F3_2 = nn.Conv2d(in_channels_F3, in_channels_F3//2, kernel_size=3, padding=1)
+        #self.deconv = nn.ConvTranspose2d(
+         #   in_channels_F3, in_channels_F3//2, kernel_size=3, stride=1, padding=1)
+        # 通道注意力用于融合后的特征
+        self.final_ca = ECAAttention1(in_channels_F2)
+        self.conv = nn.Conv2d(self.channel,self.channel//2, kernel_size=3, padding=1)
+        # 最终降维卷积
+        self.final_conv = nn.Conv2d(in_channels_F1 + in_channels_F3, in_channels_F2, kernel_size=3, padding=1)
+        self.prelu = nn.PReLU(in_channels_F2) # PReLU激活函数
+        #self.prelu = nn.SELU()
+        #self.prelu = nn.SiLU()
+        self.patchnorm = nn.BatchNorm2d(in_channels_F2)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dw_conv1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=1, padding=0, groups=in_channels_F3)
+        self.bn1 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv1
+
+        self.conv_l = nn.Conv2d(in_channels_F2, in_channels_F2, kernel_size=1, padding=0)
+        self.g1 = nn.Sigmoid()
+        self.dw_conv2 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=7, padding=3, groups=in_channels_F3)
+        self.bn2 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv2
+
+        self.bnf = nn.BatchNorm2d(in_channels_F2)  # Batch Normalization after dw_conv2
+        self.relu = nn.PReLU(in_channels_F2)  # PReLU激活函数
+        #self.relu = nn.ReLU(inplace=True)
+        #self.relu = nn.SELU()
+        #self.relu = nn.SiLU()
+    def forward(self, F1, F2, F3):
+        # Step 1: Extract high-frequency features from F1
+        F1_avg = F.adaptive_avg_pool2d(F1, (1, 1))  # Global average pooling
+        F1_up = F.interpolate(F1_avg, size=F1.shape[2:], mode='bilinear', align_corners=False)  # 上采样
+        F1_high_freq = F1 - F1_up  # F1的高频特征
+
+
+
+        # Step 3: Process F1' and F3' for feature fusion
+        F1_processed = self.conv_F1(F1_high_freq)  # 对F1'进行1x1卷积
+        F1_processed = F.interpolate(F1_processed, scale_factor=0.5, mode='bilinear', align_corners=False)  # 下采样
+
+        #F3_processed = self.conv_F3_1(F3)  # 对F3'进行第一次3x3卷积
+        #F3_processed = self.conv_F3_2(F3_processed)  # 对F3'进行第二次3x3卷积
+        F3_p1 = self.dw_conv1(F3)
+        F3_p1 = self.bn1(F3_p1)
+        F3_p2 = self.dw_conv2(F3)
+        F3_p2 = self.bn2(F3_p2)
+        F3_processed = F.interpolate(F3_p2+F3_p1, scale_factor=2, mode='bilinear', align_corners=False)  # 上采样
+        #F3_processed = self.deconv(F3)
+        # Step 4: Concatenate F1' and F3' after processing
+        fused_features = torch.cat([F1_processed, F3_processed], dim=1)
+
+        fused_features = self.final_conv(fused_features)
+        fused_features = self.patchnorm(fused_features)
+        fused_features = self.prelu(fused_features)
+
+        # Step 6: Split the channels into two halves and process
+        half_C = self.channel // 2
+        f1_first_half = fused_features[:, :half_C, :, :]
+        f2_first_half = F2[:, :half_C, :, :]
+
+        # 前一半通道相加
+        #fused_first_half = f1_first_half + f2_first_half
+        fused_first_half = torch.cat([f1_first_half, f2_first_half], dim=1)
+        fused_first_half = self.conv(fused_first_half)
+        # 后一半通道拼接
+        f1_second_half = fused_features[:, half_C:, :, :]
+        f2_second_half = F2[:, half_C:, :, :]
+        #concatenated_second_half = torch.cat([f1_second_half, f2_second_half], dim=1)
+        concatenated_second_half = f1_second_half + f2_second_half
+        # 卷积操作
+        #concatenated_second_half = self.conv(concatenated_second_half)
+        fused_features = torch.cat([fused_first_half, concatenated_second_half], dim=1)
+        # Step 7: 合并处理后的特征
+        #fused_features = torch.cat((F2, conf), dim=1)
+        # Step 6: Final convolution to match the output channels of F2
+        out = self.final_ca(fused_features)
+
+        # Step 7: Add the enhanced features with F2
+        out = out + F2*self.g1(self.conv_l(F2))
+
+        return self.relu(self.bnf(out))
+
+class TSG_1(nn.Module):
+    def __init__(self, in_channels):
+        super(TSG_1, self).__init__()
+
+        #resnet18 用的注释
+        #self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
+        #                      groups=in_channels, padding_mode='reflect')
+        self.dw_conv =DwConv(in_channels=in_channels,out_channels=in_channels)
+
+        # Step 2: Define 3 Deformable Convolutions (one for each task)
+        self.deformable_conv_seg = DeformConv(in_channels,in_channels)
+        self.deformable_conv_enh = DeformConv(in_channels,in_channels)
+        self.deformable_conv_depth = DeformConv(in_channels,in_channels)
+        self.se1 = SEBlock(in_channels=in_channels)
+        self.se2 = SEBlock(in_channels=in_channels)
+        self.se3 = SEBlock(in_channels=in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
+    def forward(self, x):
+        # Step 1: Apply Depth-wise Convolution
+        f5_prime = self.dw_conv(x)
+
+        # Step 2: Apply Deformable Convolutions for each task
+        #f5_seg = self.deformable_conv_seg(f5_prime)
+        f5_seg = self.deformable_conv_seg(f5_prime)+x
+        f5_enh = self.deformable_conv_enh(f5_prime)+x
+        #f5_enh = self.deformable_conv_enh(f5_prime)
+        f5_depth = self.deformable_conv_depth(f5_prime)+x
+        #f5_depth = self.deformable_conv_depth(f5_prime)
+
+
+
+        # Step 4: Channel-wise feature enhancement
+        enhanced_seg = self.relu(self.se1(f5_seg)+f5_seg)
+        enhanced_enh = self.relu2(f5_enh + self.se2(f5_enh))
+        enhanced_depth = self.relu3(f5_depth + self.se3(f5_depth))
+
+        return enhanced_seg, enhanced_enh, enhanced_depth
+
+class TSG_2(nn.Module):
+    def __init__(self, in_channels):
+        super(TSG_2, self).__init__()
+
+        #resnet18 用的注释
+        self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
+                              groups=in_channels, padding_mode='reflect')
+        #self.dw_conv =DwConv(in_channels=in_channels,out_channels=in_channels)
+
+        # Step 2: Define 3 Deformable Convolutions (one for each task)
+        self.deformable_conv_seg = DeformConv(in_channels,in_channels)
+        self.deformable_conv_enh = DeformConv(in_channels,in_channels)
+        self.deformable_conv_depth = DeformConv(in_channels,in_channels)
+        self.se1 = SEBlock(in_channels=in_channels)
+        self.se2 = SEBlock(in_channels=in_channels)
+        self.se3 = SEBlock(in_channels=in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
+    def forward(self, x):
+        # Step 1: Apply Depth-wise Convolution
+        f5_prime = self.dw_conv(x)
+
+        # Step 2: Apply Deformable Convolutions for each task
+        f5_seg = self.deformable_conv_seg(f5_prime)
+        #f5_seg = self.deformable_conv_seg(f5_prime)+x
+        #f5_enh = self.deformable_conv_enh(f5_prime)+x
+        f5_enh = self.deformable_conv_enh(f5_prime)
+        #f5_depth = self.deformable_conv_depth(f5_prime)+x
+        f5_depth = self.deformable_conv_depth(f5_prime)
+
+
+
+        # Step 4: Channel-wise feature enhancement
+        enhanced_seg = self.relu(self.se1(f5_seg)+f5_seg)
+        enhanced_enh = self.relu2(f5_enh + self.se2(f5_enh))
+        enhanced_depth = self.relu3(f5_depth + self.se3(f5_depth))
+
+        return enhanced_seg, enhanced_enh, enhanced_depth
+
+class MSIE1(nn.Module):
+    def __init__(self, in_channels_F1, in_channels_F2, in_channels_F3):
+        super(MSIE1, self).__init__()
+
+        # 通道注意力
+
+
+        # 1x1卷积用于F1'
+        self.conv_F1 = nn.Conv2d(in_channels_F1, in_channels_F1, kernel_size=1)
+        self.channel = in_channels_F2
+        # 两次3x3卷积用于F3'
+        #self.conv_F3_1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=3, padding=1)
+        #self.conv_F3_2 = nn.Conv2d(in_channels_F3, in_channels_F3//2, kernel_size=3, padding=1)
+        #self.deconv = nn.ConvTranspose2d(
+         #   in_channels_F3, in_channels_F3//2, kernel_size=3, stride=1, padding=1)
+        # 通道注意力用于融合后的特征
+        self.final_ca = ECAAttention1(in_channels_F2)
+        self.conv = nn.Conv2d(self.channel,self.channel//2, kernel_size=3, padding=1)
+        # 最终降维卷积
+        self.final_conv = nn.Conv2d(in_channels_F1 + in_channels_F3, in_channels_F2, kernel_size=3, padding=1)
+        #self.prelu = nn.PReLU(in_channels_F2) # PReLU激活函数
+        #self.prelu = nn.SELU()
+        self.prelu = nn.SiLU()
+        self.patchnorm = nn.BatchNorm2d(in_channels_F2)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dw_conv1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=1, padding=0, groups=in_channels_F3)
+        self.bn1 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv1
+
+        self.conv_l = nn.Conv2d(in_channels_F2, in_channels_F2, kernel_size=1, padding=0)
+        self.g1 = nn.Sigmoid()
+        self.dw_conv2 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=7, padding=3, groups=in_channels_F3)
+        self.bn2 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv2
+
+        self.bnf = nn.BatchNorm2d(in_channels_F2)  # Batch Normalization after dw_conv2
+        #self.relu = nn.PReLU(in_channels_F2)  # PReLU激活函数
+        #self.relu = nn.ReLU(inplace=True)
+        #self.relu = nn.SELU()
+        self.relu = nn.SiLU()
+    def forward(self, F1, F2, F3):
+        # Step 1: Extract high-frequency features from F1
+        F1_avg = F.adaptive_avg_pool2d(F1, (1, 1))  # Global average pooling
+        F1_up = F.interpolate(F1_avg, size=F1.shape[2:], mode='bilinear', align_corners=False)  # 上采样
+        F1_high_freq = F1 - F1_up  # F1的高频特征
+
+
+
+        # Step 3: Process F1' and F3' for feature fusion
+        F1_processed = self.conv_F1(F1_high_freq)  # 对F1'进行1x1卷积
+        F1_processed = F.interpolate(F1_processed, scale_factor=0.5, mode='bilinear', align_corners=False)  # 下采样
+
+        #F3_processed = self.conv_F3_1(F3)  # 对F3'进行第一次3x3卷积
+        #F3_processed = self.conv_F3_2(F3_processed)  # 对F3'进行第二次3x3卷积
+        F3_p1 = self.dw_conv1(F3)
+        F3_p1 = self.bn1(F3_p1)
+        F3_p2 = self.dw_conv2(F3)
+        F3_p2 = self.bn2(F3_p2)
+        F3_processed = F.interpolate(F3_p2+F3_p1, scale_factor=2, mode='bilinear', align_corners=False)  # 上采样
+        #F3_processed = self.deconv(F3)
+        # Step 4: Concatenate F1' and F3' after processing
+        fused_features = torch.cat([F1_processed, F3_processed], dim=1)
+
+        fused_features = self.final_conv(fused_features)
+        fused_features = self.patchnorm(fused_features)
+        fused_features = self.prelu(fused_features)
+
+        # Step 6: Split the channels into two halves and process
+        half_C = self.channel // 2
+        f1_first_half = fused_features[:, :half_C, :, :]
+        f2_first_half = F2[:, :half_C, :, :]
+
+        # 前一半通道相加
+        #fused_first_half = f1_first_half + f2_first_half
+        fused_first_half = torch.cat([f1_first_half, f2_first_half], dim=1)
+        fused_first_half = self.conv(fused_first_half)
+        # 后一半通道拼接
+        f1_second_half = fused_features[:, half_C:, :, :]
+        f2_second_half = F2[:, half_C:, :, :]
+        #concatenated_second_half = torch.cat([f1_second_half, f2_second_half], dim=1)
+        concatenated_second_half = f1_second_half + f2_second_half
+        # 卷积操作
+        #concatenated_second_half = self.conv(concatenated_second_half)
+        fused_features = torch.cat([fused_first_half, concatenated_second_half], dim=1)
+        # Step 7: 合并处理后的特征
+        #fused_features = torch.cat((F2, conf), dim=1)
+        # Step 6: Final convolution to match the output channels of F2
+        out = self.final_ca(fused_features)
+
+        # Step 7: Add the enhanced features with F2
+        out = out + F2*self.g1(self.conv_l(F2))
+
+        return self.relu(self.bnf(out))
 
 class FeatureEnhancement(nn.Module):
     def __init__(self, in_channels_F1, in_channels_F2, in_channels_F3):
@@ -378,89 +1205,6 @@ class FeatureEnhancement(nn.Module):
         #F3_processed = self.conv_F3_1(F3)  # 对F3'进行第一次3x3卷积
         #F3_processed = self.conv_F3_2(F3_processed)  # 对F3'进行第二次3x3卷积
         F3_processed = F.interpolate(F3, scale_factor=2, mode='bilinear', align_corners=False)  # 上采样
-        #F3_processed = self.deconv(F3)
-        # Step 4: Concatenate F1' and F3' after processing
-        fused_features = torch.cat([F1_processed, F3_processed], dim=1)
-
-        fused_features = self.final_conv(fused_features)
-        fused_features = self.patchnorm(fused_features)
-        fused_features = self.prelu(fused_features)
-
-        # Step 6: Split the channels into two halves and process
-        half_C = self.channel // 2
-        f1_first_half = fused_features[:, :half_C, :, :]
-        f2_first_half = F2[:, :half_C, :, :]
-
-        # 前一半通道相加
-        fused_first_half = f1_first_half + f2_first_half
-
-        # 后一半通道拼接
-        f1_second_half = fused_features[:, half_C:, :, :]
-        f2_second_half = F2[:, half_C:, :, :]
-        concatenated_second_half = torch.cat([f1_second_half, f2_second_half], dim=1)
-
-        # 卷积操作
-        concatenated_second_half = self.conv(concatenated_second_half)
-
-        # Step 7: 合并处理后的特征
-        fused_features = F2 + torch.cat([fused_first_half, concatenated_second_half], dim=1)
-        # Step 6: Final convolution to match the output channels of F2
-        out = self.final_ca(fused_features)
-
-        # Step 7: Add the enhanced features with F2
-        out = out + F2
-
-        return out
-
-
-class FE1(nn.Module):
-    def __init__(self, in_channels_F1, in_channels_F2, in_channels_F3):
-        super(FE1, self).__init__()
-
-        # 通道注意力
-
-
-        # 1x1卷积用于F1'
-        self.conv_F1 = nn.Conv2d(in_channels_F1, in_channels_F1, kernel_size=1)
-        self.channel = in_channels_F2
-        # 两次3x3卷积用于F3'
-        #self.conv_F3_1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=3, padding=1)
-        #self.conv_F3_2 = nn.Conv2d(in_channels_F3, in_channels_F3//2, kernel_size=3, padding=1)
-        #self.deconv = nn.ConvTranspose2d(
-         #   in_channels_F3, in_channels_F3//2, kernel_size=3, stride=1, padding=1)
-        # 通道注意力用于融合后的特征
-        self.final_ca = ECAAttention1(in_channels_F2)
-        self.conv = nn.Conv2d(self.channel,self.channel//2, kernel_size=3, padding=1)
-        # 最终降维卷积
-        self.final_conv = nn.Conv2d(in_channels_F1 + in_channels_F3, in_channels_F2, kernel_size=3, padding=1)
-        self.prelu = nn.PReLU(in_channels_F2)  # PReLU激活函数
-        self.patchnorm = nn.BatchNorm2d(in_channels_F2)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.dw_conv1 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=1, padding=0, groups=in_channels_F3)
-        self.bn1 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv1
-
-        self.dw_conv2 = nn.Conv2d(in_channels_F3, in_channels_F3, kernel_size=7, padding=3, groups=in_channels_F3)
-        self.bn2 = nn.BatchNorm2d(in_channels_F3)  # Batch Normalization after dw_conv2
-
-    def forward(self, F1, F2, F3):
-        # Step 1: Extract high-frequency features from F1
-        F1_avg = F.adaptive_avg_pool2d(F1, (1, 1))  # Global average pooling
-        F1_up = F.interpolate(F1_avg, size=F1.shape[2:], mode='bilinear', align_corners=False)  # 上采样
-        F1_high_freq = F1 - F1_up  # F1的高频特征
-
-
-
-        # Step 3: Process F1' and F3' for feature fusion
-        F1_processed = self.conv_F1(F1_high_freq)  # 对F1'进行1x1卷积
-        F1_processed = F.interpolate(F1_processed, scale_factor=0.5, mode='bilinear', align_corners=False)  # 下采样
-
-        #F3_processed = self.conv_F3_1(F3)  # 对F3'进行第一次3x3卷积
-        #F3_processed = self.conv_F3_2(F3_processed)  # 对F3'进行第二次3x3卷积
-        F3_p1 = self.dw_conv1(F3)
-        F3_p1 = self.bn1(F3_p1)
-        F3_p2 = self.dw_conv2(F3)
-        F3_p2 = self.bn2(F3_p2)
-        F3_processed = F.interpolate(F3_p2+F3_p1, scale_factor=2, mode='bilinear', align_corners=False)  # 上采样
         #F3_processed = self.deconv(F3)
         # Step 4: Concatenate F1' and F3' after processing
         fused_features = torch.cat([F1_processed, F3_processed], dim=1)
@@ -574,8 +1318,8 @@ class Enh_f(nn.Module):
 
 
 
-    def forward(self, x):
-        e1, e2, e3, e4, e5 = x
+    def forward(self, e1,e2,e3,e4,e5):
+        #e1, e2, e3, e4, e5 = x
 
         d5 = self.decoder5(e5)  # 14
         d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
@@ -586,18 +1330,45 @@ class Enh_f(nn.Module):
 
         return d1
 
+class Enh_f1(nn.Module):
+    def __init__(self):
+        super(Enh_f1, self).__init__()
+        # Decoder
+        self.decoder5 = DecoderBlock(in_channels=512, out_channels=512)
+        self.decoder4 = DecoderBlock(in_channels=512 + 256, out_channels=256)
+        self.decoder3 = DecoderBlock(in_channels=256 + 128, out_channels=128)
+        self.decoder2 = DecoderBlock(in_channels=128 + 64, out_channels=64)
+        self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
+
+
+
+    def forward(self, e1,e2,e3,e4,e5):
+        #e1, e2, e3, e4, e5 = x
+
+        d5 = self.decoder5(e5)  # 14
+        d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
+        d3 = self.decoder3(torch.cat((d4, e3), dim=1))  # 56
+        d2 = self.decoder2(torch.cat((d3, e2), dim=1))  # 128
+        d1 = self.decoder1(torch.cat((d2, e1), dim=1))  # 224*224*64
+
+
+        return d1,d5
+
 class Enh_h(nn.Module):
     def __init__(self, num_classes, dropout=0.1):
         super(Enh_h, self).__init__()
         # Decoder
 
-
         self.outconv = nn.Sequential(
-            ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.Dropout2d(dropout),
-            ConvBlock(32, 3, kernel_size=3, stride=1, padding=1),
-            nn.Conv2d(3, 3, kernel_size=3, padding=1),
+
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
         )
+        #self.outconv = nn.Sequential(
+         #   ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+          #  nn.Dropout2d(dropout),
+           # ConvBlock(32, 3, kernel_size=3, stride=1, padding=1),
+            #nn.Conv2d(3, 3, kernel_size=3, padding=1),
+        #)
 
     def forward(self, x):
         self.outputs = {}
@@ -618,9 +1389,9 @@ class Depth_f(nn.Module):
         self.decoder2 = DecoderBlock(in_channels=128 + 64, out_channels=64)
         self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
 
-    def forward(self, x):
+    def forward(self, e1,e2,e3,e4,e5):
 
-        e1, e2, e3, e4, e5 = x
+        #e1, e2, e3, e4, e5 = x
 
         d5 = self.decoder5(e5)  # 14
         d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
@@ -630,6 +1401,52 @@ class Depth_f(nn.Module):
 
 
         return d1
+class Depth_f1(nn.Module):
+    def __init__(self):
+        super(Depth_f1, self).__init__()
+        # Decoder
+        self.decoder5 = DecoderBlock(in_channels=512, out_channels=512)
+        self.decoder4 = DecoderBlock(in_channels=512 + 256, out_channels=256)
+        self.decoder3 = DecoderBlock(in_channels=256 + 128, out_channels=128)
+        self.decoder2 = DecoderBlock(in_channels=128 + 64, out_channels=64)
+        self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
+
+    def forward(self, e1,e2,e3,e4,e5):
+
+        #e1, e2, e3, e4, e5 = x
+
+        d5 = self.decoder5(e5)  # 14
+        d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
+        d3 = self.decoder3(torch.cat((d4, e3), dim=1))  # 56
+        d2 = self.decoder2(torch.cat((d3, e2), dim=1))  # 128
+        d1 = self.decoder1(torch.cat((d2, e1), dim=1))  # 224*224*64
+
+
+        return d1,d5
+
+class Depth_f2(nn.Module):
+    def __init__(self):
+        super(Depth_f2, self).__init__()
+        # Decoder
+        self.decoder5 = DecoderBlock(in_channels=512, out_channels=512)
+        self.decoder4 = DecoderBlock(in_channels=512 + 256, out_channels=256)
+        self.decoder3 = DecoderBlock(in_channels=256 + 128, out_channels=128)
+        self.decoder2 = DecoderBlock(in_channels=128 + 64, out_channels=64)
+        self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, e1,e2,e3,e4,e5):
+
+        #e1, e2, e3, e4, e5 = x
+
+        d5 = self.decoder5(e5)  # 14
+        d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
+        d3 = self.decoder3(torch.cat((d4, e3), dim=1))  # 56
+        d2 = self.decoder2(torch.cat((d3, e2), dim=1))  # 128
+        d1 = self.decoder1(torch.cat((d2, e1), dim=1))  # 224*224*64
+
+
+        return d1,d5,self.sigmoid(d4),self.sigmoid(d3),self.sigmoid(d2)
+
 from models.depth_decoder_QTR import Depth_Decoder_QueryTr
 class Depth_h_bins(nn.Module):
     def __init__(self, num_classes, dropout=0.1):
@@ -639,7 +1456,8 @@ class Depth_h_bins(nn.Module):
         self.outconv = Depth_Decoder_QueryTr(in_channels=32, patch_size=20, dim_out=128, embedding_dim=32,
                                                                     query_nums=128, num_heads=4, min_val=0.001, max_val=80.0)
 
-        self.enh_eds = FEDS1(64, 32)
+        #self.enh_eds = FEDS1(64, 32)
+        self.enh_eds = FEDS2(64, 32)
     def forward(self, x):
         self.outputs = {}
 
@@ -713,7 +1531,6 @@ class FEDS1(nn.Module):
         out = self.selu(out)
 
         return out
-
 class FEDS2(nn.Module):
     def __init__(self, in_channels, out_channels_F2):
         super(FEDS2, self).__init__()
@@ -732,15 +1549,15 @@ class FEDS2(nn.Module):
         self.dwconv_F1 = DwConv(in_channels, in_channels)
         # 最后的融合
         #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
-        self.conv_out = nn.Conv2d(in_channels*2, out_channels_F2, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv2d(in_channels*2, in_channels, kernel_size=3, padding=1)
+        self.conv_out1 = nn.Conv2d(in_channels, out_channels_F2, kernel_size=3, padding=1)
         self.bn = nn.BatchNorm2d(out_channels_F2)
         #self.prelu = nn.PReLU()
-        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-        self.selu = nn.SELU()
+        #self.sigmoid = nn.Sigmoid()
+        #self.selu = nn.SELU()
+        self.selu = nn.ReLU()
     def forward(self, F1, F2, F3):
         # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
-        g1 = self.sigmoid(self.gv1(F2))
         sim = cosine_similarity(F1, F2)  # 计算余弦相似度
 
         F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
@@ -761,7 +1578,8 @@ class FEDS2(nn.Module):
         # Step 4: F2 与 F3' 点乘得到 Fb
         #F2_F3 = self.fc_F2_F3(F2)
         #Fb = F2 * F1_prime +F2
-        Fb = F2 * F1_prime
+        Fb = F2 * (F1_prime)
+        
         # Step 5: 拼接 Fa 和 Fb
         #fused_features = torch.cat([Fa, Fb], dim=1)
         batch_size, channels, height, width = Fa.size()
@@ -774,87 +1592,100 @@ class FEDS2(nn.Module):
         fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
         # Step 6: 最后的卷积操作
         out = self.conv_out(fused_features)
-        out = out*(1-g1)+F2*g1
-        #out = self.conv_out(Fb)
-        out = self.bn(out)
-        out = self.selu(out)
-
+        out =out+F2
+        #out = self.bn(out)
+        #out = self.selu(out)
+        out = self.conv_out1(out)
         return out
-class EncoderD5(nn.Module):
-    def __init__(self, num_layers, pretrained, num_classes):
-        super(EncoderD5, self).__init__()
-        # Decoder
-        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
-        self.d_s = Seg_f()
-        self.d_e = Enh_f()
-        self.d_d = Depth_f()
-        self.tsg =TSG1(in_channels=512)
-        self.fe1 = FE1(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
-        self.fe2 = FE1(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
-        self.fe3 = FE1(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
-        self.e = nn.Sequential(
-            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            # nn.Dropout2d(dropout),
-            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
-        )
-        self.s = nn.Sequential(
-            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            # nn.Dropout2d(dropout),
-            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
-        )
-        self.d = nn.Sequential(
-            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            # nn.Dropout2d(dropout),
-            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
-        )
-    def forward(self, x):
-        self.features = []
-        self.outputs ={}
-        e1,e2,e3,e4,e5 = self.encoder(x)
-        e2_e = self.fe1(e1, e2, e3)
-        e3_e = self.fe2(e2, e3, e4)
-        e4_e = self.fe3(e3, e4, e5)
-        e2 = e2_e
-        e3 = e3_e
-        e4 = e4_e
-        e5_e,e5_s,e5_d = self.tsg(e5)
-        d_e = self.d_e(e1,e2,e3,e4,e5_e)
-        #print(d_e.shape)
-        self.outputs["enh0"] = self.e(d_e)
-        self.features.append(d_e)
-        d_e = self.d_s(e1,e2,e3,e4,e5_s)
-        self.outputs["seg0"] = self.s(d_e)
-        self.features.append(d_e)
-        d_e = self.d_d(e1,e2,e3,e4,e5_d)
-        self.features.append(d_e)
-        self.outputs[("disp0", 0)] = self.d(d_e)
-        #self.outputs["enh_f"] = self.d_e(x)
-        #self.outputs["s_f"] = self.d_s(x)
-        #self.outputs["d_f"] = self.d_d(x)
 
-
-        return self.features,self.outputs
 class Depth_h(nn.Module):
     def __init__(self, num_classes, dropout=0.1):
         super(Depth_h, self).__init__()
         # Decoder
 
-        self.outconv = nn.Sequential(
-            ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.Dropout2d(dropout),
-            ConvBlock(32, 1, kernel_size=3, stride=1, padding=1),
+        #self.outconv = nn.Sequential(
+         #   ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+          #  nn.Dropout2d(dropout),
+           # ConvBlock(32, 1, kernel_size=3, stride=1, padding=1),
             #nn.Conv2d(32, 1, kernel_size=3, padding=1),
+        #)
+        self.outconv = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
         )
-
         self.sigmoid = nn.Sigmoid()
-        self.enh_eds = FEDS2(64, 64)
+        #self.enh_eds = FEDS2(64, 32)
+        self.enh_eds = FEDS4(64, 64)
+        #self.enh_eds = FEDS5(64, 64)
     def forward(self, x):
         self.outputs = {}
 
         enh_f, s_f, d_f = x
         d1 = self.enh_eds(enh_f, d_f, s_f)
         out1 = self.outconv(d1)
+
+        self.outputs[("disp", 0)] = self.sigmoid(out1)
+
+        return self.outputs
+
+
+class Depth_h2(nn.Module):
+    def __init__(self, num_classes, dropout=0.1):
+        super(Depth_h2, self).__init__()
+        # Decoder
+
+        #self.outconv = nn.Sequential(
+         #   ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+          #  nn.Dropout2d(dropout),
+           # ConvBlock(32, 1, kernel_size=3, stride=1, padding=1),
+            #nn.Conv2d(32, 1, kernel_size=3, padding=1),
+        #)
+        self.outconv = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+        )
+        self.sigmoid = nn.Sigmoid()
+        #self.enh_eds = FEDS2(64, 32)
+        self.enh_eds = CFR1(64, 64)
+        #self.enh_eds = FEDS5(64, 64)
+    def forward(self, x):
+        self.outputs = {}
+
+        enh_f, s_f, d_f = x
+        d1 = self.enh_eds(enh_f, d_f, s_f)
+        out1 = self.outconv(d1)
+
+        self.outputs[("disp", 0)] = self.sigmoid(out1)
+
+        return self.outputs
+
+class Depth_h1(nn.Module):
+    def __init__(self, num_classes, dropout=0.1):
+        super(Depth_h1, self).__init__()
+        # Decoder
+
+        #self.outconv = nn.Sequential(
+         #   ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+          #  nn.Dropout2d(dropout),
+           # ConvBlock(32, 1, kernel_size=3, stride=1, padding=1),
+            #nn.Conv2d(32, 1, kernel_size=3, padding=1),
+        #)
+        self.outconv = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+        )
+        self.sigmoid = nn.Sigmoid()
+        #self.enh_eds = FEDS2(64, 32)
+        #self.enh_eds = FEDS4(64, 64)
+    def forward(self, x):
+        self.outputs = {}
+
+        enh_f, s_f, d_f = x
+        #d1 = self.enh_eds(enh_f, d_f, s_f)
+        out1 = self.outconv(d_f)
 
         self.outputs[("disp", 0)] = self.sigmoid(out1)
 
@@ -871,8 +1702,8 @@ class Seg_f(nn.Module):
         self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
 
 
-    def forward(self, x):
-        e1, e2, e3, e4, e5 = x
+    def forward(self, e1,e2,e3,e4,e5):
+        #e1, e2, e3, e4, e5 = x
 
         d5 = self.decoder5(e5)  # 14
         d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
@@ -881,6 +1712,27 @@ class Seg_f(nn.Module):
         d1 = self.decoder1(torch.cat((d2, e1), dim=1))  # 224*224*64
 
         return d1
+class Seg_f1(nn.Module):
+    def __init__(self):
+        super(Seg_f1, self).__init__()
+        # Decoder
+        self.decoder5 = DecoderBlock(in_channels=512, out_channels=512)
+        self.decoder4 = DecoderBlock(in_channels=512 + 256, out_channels=256)
+        self.decoder3 = DecoderBlock(in_channels=256 + 128, out_channels=128)
+        self.decoder2 = DecoderBlock(in_channels=128 + 64, out_channels=64)
+        self.decoder1 = DecoderBlock(in_channels=64 + 64, out_channels=64)
+
+
+    def forward(self, e1,e2,e3,e4,e5):
+        #e1, e2, e3, e4, e5 = x
+
+        d5 = self.decoder5(e5)  # 14
+        d4 = self.decoder4(torch.cat((d5, e4), dim=1))  # 28
+        d3 = self.decoder3(torch.cat((d4, e3), dim=1))  # 56
+        d2 = self.decoder2(torch.cat((d3, e2), dim=1))  # 128
+        d1 = self.decoder1(torch.cat((d2, e1), dim=1))  # 224*224*64
+
+        return d1,d5
 class Seg_h(nn.Module):
     def __init__(self, num_classes, dropout=0.1):
         super(Seg_h, self).__init__()
@@ -891,14 +1743,16 @@ class Seg_h(nn.Module):
           #  nn.Dropout2d(dropout),
            # nn.Conv2d(32, num_classes, 1),
         #)
+        #self.outconv = nn.Sequential(
+         #   nn.Conv2d(64, num_classes, 1),
+        #)
         self.outconv = nn.Sequential(
-           # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
-            #nn.Dropout2d(dropout),
-            nn.Conv2d(32, num_classes, 1),
+            nn.Conv2d(64, num_classes, kernel_size=3,stride=1,padding=1),
         )
         #self.channel_w = ChannelWeights(dim=64)
-        self.enh_eds = FEDS2(64, 64)
-
+        self.enh_eds = FEDS4(64, 64)
+        #self.enh_eds = FEDS5(64, 64)
+        #self.enh_eds = FEDS2(64, 32)
     def forward(self, x):
         self.outputs = {}
         enh_f, s_f, d_f = x
@@ -909,6 +1763,99 @@ class Seg_h(nn.Module):
         out1 = self.outconv(d1)  # 224
         self.outputs["seg"] = out1
         return self.outputs
+
+class Seg_h2(nn.Module):
+    def __init__(self, num_classes, dropout=0.1):
+        super(Seg_h2, self).__init__()
+        # Decoder
+
+        self.outconv = nn.Sequential(
+            nn.Conv2d(64, num_classes, kernel_size=3,stride=1,padding=1),
+        )
+        #self.channel_w = ChannelWeights(dim=64)
+        self.enh_eds = CFR1(64, 64)
+        #self.enh_eds = FEDS5(64, 64)
+        #self.enh_eds = FEDS2(64, 32)
+    def forward(self, x):
+        self.outputs = {}
+        enh_f, s_f, d_f = x
+        #wt = cosine_similarity(d1, enh_f)
+        #d1 = d1 + torch.clamp(wt, min=0.0, max=1.0)*enh_f
+        d1 = self.enh_eds(enh_f, s_f, d_f)
+        #d1 = self.channel_w(d1,enh_f)
+        out1 = self.outconv(d1)  # 224
+        self.outputs["seg"] = out1
+        return self.outputs
+
+class Seg_h1(nn.Module):
+    def __init__(self, num_classes, dropout=0.1):
+        super(Seg_h1, self).__init__()
+        # Decoder
+
+        #self.outconv = nn.Sequential(
+         #   ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+          #  nn.Dropout2d(dropout),
+           # nn.Conv2d(32, num_classes, 1),
+        #)
+        self.outconv = nn.Sequential(
+           # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            #nn.Dropout2d(dropout),
+            nn.Conv2d(64, num_classes, 1),
+        )
+        #self.channel_w = ChannelWeights(dim=64)
+        #self.enh_eds = FEDS4(64, 64)
+
+        #self.enh_eds = FEDS2(64, 32)
+    def forward(self, x):
+        self.outputs = {}
+        enh_f, s_f, d_f = x
+        #wt = cosine_similarity(d1, enh_f)
+        #d1 = d1 + torch.clamp(wt, min=0.0, max=1.0)*enh_f
+        #d1 = self.enh_eds(enh_f, s_f, d_f)
+        #d1 = self.channel_w(d1,enh_f)
+        out1 = self.outconv(s_f)  # 224
+        self.outputs["seg"] = out1
+        return self.outputs
+
+from models.deformable_2d import DeformConv
+class TSG(nn.Module):
+    def __init__(self, in_channels):
+        super(TSG, self).__init__()
+
+        # Step 1: Apply depth-wise convolution to get F5'
+        self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
+                              groups=in_channels, padding_mode='reflect')
+
+        # Step 2: Define 3 Deformable Convolutions (one for each task)
+        self.deformable_conv_seg = DeformConv(in_channels,in_channels)
+        self.deformable_conv_enh = DeformConv(in_channels,in_channels)
+        self.deformable_conv_depth = DeformConv(in_channels,in_channels)
+
+    def forward(self, x):
+        # Step 1: Apply Depth-wise Convolution
+        f5_prime = self.dw_conv(x)
+
+        # Step 2: Apply Deformable Convolutions for each task
+        f5_seg = self.deformable_conv_seg(f5_prime)
+        f5_enh = self.deformable_conv_enh(f5_prime)
+        f5_depth = self.deformable_conv_depth(f5_prime)
+
+        # Step 3: Apply Global Average Pooling (GAP) and Sigmoid, then channel enhancement
+        gap_seg = torch.mean(f5_seg, dim=[2, 3], keepdim=True)
+        gap_enh = torch.mean(f5_enh, dim=[2, 3], keepdim=True)
+        gap_depth = torch.mean(f5_depth, dim=[2, 3], keepdim=True)
+
+        # Apply sigmoid to GAP results
+        sig_seg = torch.sigmoid(gap_seg)
+        sig_enh = torch.sigmoid(gap_enh)
+        sig_depth = torch.sigmoid(gap_depth)
+
+        # Step 4: Channel-wise feature enhancement
+        enhanced_seg = f5_seg * sig_seg
+        enhanced_enh = f5_enh * sig_enh
+        enhanced_depth = f5_depth * sig_depth
+
+        return enhanced_seg, enhanced_enh, enhanced_depth
 class TSG1(nn.Module):
     def __init__(self, in_channels):
         super(TSG1, self).__init__()
@@ -947,20 +1894,60 @@ class TSG1(nn.Module):
         enhanced_depth = f5_depth * sig_depth + f5_prime
 
         return enhanced_seg, enhanced_enh, enhanced_depth
-from models.deformable_2d import DeformConv
-class TSG(nn.Module):
+
+
+class SEBlock(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=16):
+        """
+        初始化 Squeeze-and-Excitation 模块
+
+        Parameters:
+            in_channels (int): 输入特征图的通道数
+            reduction_ratio (int): 压缩比例，默认为 16
+        """
+        super(SEBlock, self).__init__()
+
+        # Squeeze 操作：全局平均池化
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        self.fc1 = nn.Linear(in_channels, in_channels // reduction_ratio, bias=False)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(in_channels // reduction_ratio, in_channels, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        squeeze_out = self.global_avg_pool(x)  # (batch_size, channels, 1, 1)
+        squeeze_out = squeeze_out.view(squeeze_out.size(0), -1)  # 展平为 (batch_size, channels)
+
+        # Excitation 操作：通过全连接层计算通道注意力
+        excitation_out = self.fc1(squeeze_out)
+        excitation_out = self.relu(excitation_out)
+        excitation_out = self.fc2(excitation_out)
+
+        # Sigmoid 激活来生成通道注意力权重
+        excitation_out = self.sigmoid(excitation_out).view(excitation_out.size(0), excitation_out.size(1), 1, 1)
+
+        # 将注意力权重应用到输入特征图
+        return x * excitation_out
+
+class TSG2(nn.Module):
     def __init__(self, in_channels):
-        super(TSG, self).__init__()
+        super(TSG2, self).__init__()
 
         # Step 1: Apply depth-wise convolution to get F5'
-        self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
-                              groups=in_channels, padding_mode='reflect')
-
+        #self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
+                              #groups=in_channels, padding_mode='reflect')
+        self.dw_conv = nn.Conv2d(in_channels,in_channels,kernel_size=3,padding=1,stride=1)
         # Step 2: Define 3 Deformable Convolutions (one for each task)
         self.deformable_conv_seg = DeformConv(in_channels,in_channels)
         self.deformable_conv_enh = DeformConv(in_channels,in_channels)
         self.deformable_conv_depth = DeformConv(in_channels,in_channels)
-
+        self.se1 = SEBlock(in_channels=in_channels)
+        self.se2 = SEBlock(in_channels=in_channels)
+        self.se3 = SEBlock(in_channels=in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
     def forward(self, x):
         # Step 1: Apply Depth-wise Convolution
         f5_prime = self.dw_conv(x)
@@ -971,19 +1958,62 @@ class TSG(nn.Module):
         f5_depth = self.deformable_conv_depth(f5_prime)
 
         # Step 3: Apply Global Average Pooling (GAP) and Sigmoid, then channel enhancement
-        gap_seg = torch.mean(f5_seg, dim=[2, 3], keepdim=True)
-        gap_enh = torch.mean(f5_enh, dim=[2, 3], keepdim=True)
-        gap_depth = torch.mean(f5_depth, dim=[2, 3], keepdim=True)
+        #gap_seg = torch.mean(f5_seg, dim=[2, 3], keepdim=True)
+        #gap_enh = torch.mean(f5_enh, dim=[2, 3], keepdim=True)
+        #gap_depth = torch.mean(f5_depth, dim=[2, 3], keepdim=True)
 
         # Apply sigmoid to GAP results
-        sig_seg = torch.sigmoid(gap_seg)
-        sig_enh = torch.sigmoid(gap_enh)
-        sig_depth = torch.sigmoid(gap_depth)
+        #sig_seg = torch.sigmoid(gap_seg)
+        #sig_enh = torch.sigmoid(gap_enh)
+        #sig_depth = torch.sigmoid(gap_depth)
 
         # Step 4: Channel-wise feature enhancement
-        enhanced_seg = f5_seg * sig_seg
-        enhanced_enh = f5_enh * sig_enh
-        enhanced_depth = f5_depth * sig_depth
+        enhanced_seg = self.relu(self.se1(f5_seg)+f5_seg)
+        enhanced_enh = self.relu2(f5_enh + self.se2(f5_enh))
+        enhanced_depth = self.relu3(f5_depth + self.se3(f5_depth))
+
+        return enhanced_seg, enhanced_enh, enhanced_depth
+class TSG3(nn.Module):
+    def __init__(self, in_channels):
+        super(TSG3, self).__init__()
+
+        # Step 1: Apply depth-wise convolution to get F5'
+        self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=3 // 2,
+                              groups=in_channels, padding_mode='reflect')
+        #self.dw_conv = nn.Conv2d(in_channels,in_channels,kernel_size=3,padding=1,stride=1)
+        # Step 2: Define 3 Deformable Convolutions (one for each task)
+        self.deformable_conv_seg = DeformConv(in_channels,in_channels)
+        self.deformable_conv_enh = DeformConv(in_channels,in_channels)
+        self.deformable_conv_depth = DeformConv(in_channels,in_channels)
+        self.se1 = SEBlock(in_channels=in_channels)
+        self.se2 = SEBlock(in_channels=in_channels)
+        self.se3 = SEBlock(in_channels=in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.relu3 = nn.ReLU(inplace=True)
+    def forward(self, x):
+        # Step 1: Apply Depth-wise Convolution
+        f5_prime = self.dw_conv(x)
+
+        # Step 2: Apply Deformable Convolutions for each task
+        f5_seg = self.deformable_conv_seg(f5_prime)
+        f5_enh = self.deformable_conv_enh(f5_prime)
+        f5_depth = self.deformable_conv_depth(f5_prime)
+
+        # Step 3: Apply Global Average Pooling (GAP) and Sigmoid, then channel enhancement
+        #gap_seg = torch.mean(f5_seg, dim=[2, 3], keepdim=True)
+        #gap_enh = torch.mean(f5_enh, dim=[2, 3], keepdim=True)
+        #gap_depth = torch.mean(f5_depth, dim=[2, 3], keepdim=True)
+
+        # Apply sigmoid to GAP results
+        #sig_seg = torch.sigmoid(gap_seg)
+        #sig_enh = torch.sigmoid(gap_enh)
+        #sig_depth = torch.sigmoid(gap_depth)
+
+        # Step 4: Channel-wise feature enhancement
+        enhanced_seg = self.relu(self.se1(f5_seg)+f5_seg)
+        enhanced_enh = self.relu2(f5_enh + self.se2(f5_enh))
+        enhanced_depth = self.relu3(f5_depth + self.se3(f5_depth))
 
         return enhanced_seg, enhanced_enh, enhanced_depth
 
@@ -1079,72 +2109,7 @@ class FEDS_1(nn.Module):
         out = self.selu(out)
 
         return out
-class FEDS4(nn.Module):
-    def __init__(self, in_channels, out_channels_F2):
-        super(FEDS4, self).__init__()
 
-        # F1 和 F2 的交叉注意力
-        #self.fc_F1 = nn.Linear(in_channels, in_channels)
-        #self.fc_F2_k = nn.Linear(in_channels, in_channels)
-        #self.fc_F2_v = nn.Linear(in_channels, in_channels)
-        # F1' 和 F2 计算注意力
-        self.attention_block_F1_F2 = DepthwiseSeparableAttentionBlock(in_channels)
-
-        # F3 的处理
-        #self.fc_F3 = nn.Linear(in_channels, in_channels)
-        self.dwconv_F3 = DwConv(in_channels, in_channels)
-        self.dwconv_F2 = DwConv(in_channels, in_channels)
-        self.dwconv_F1 = DwConv(in_channels, in_channels)
-        # 最后的融合
-        #self.fc_F2_F3 = nn.Linear(in_channels, in_channels)
-        self.conv_out = nn.Conv2d(in_channels*2, out_channels_F2, kernel_size=3, padding=1)
-        #self.bn = nn.BatchNorm2d(out_channels_F2)
-        #self.prelu = nn.PReLU()
-        self.gv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-        #self.selu = nn.SELU()
-    def forward(self, F1, F2, F3):
-        # Step 1: F1 和 F2 计算余弦相似度得到W，然后更新 F1
-        g1 = self.sigmoid(self.gv1(F2))
-        sim = cosine_similarity(F1, F2)  # 计算余弦相似度
-
-        F1_prime = F1 + torch.clamp(sim, min=0.0, max=1.0) * F1  # F1增强
-        F1_prime =self.dwconv_F1(F1_prime)
-        #Fa = F1_prime
-        # Step 2: F1' 和 F2 经过不同的线性层，得到 Q 和 K, V
-        #F1_prime_linear = self.fc_F1(F1_prime)
-        #F2_k = self.fc_F2_k(F2)  # 使用相同的线性层处理 F2
-        #F2_v = self.fc_F2_v(F2)
-        # 使用 Transformer 注意力机制
-
-
-        # Step 3: F3 经过线性层和 DwConv 得到 F3'
-        #F3_linear = self.fc_F3(F3)
-        F3_prime = self.dwconv_F3(F3)
-        F2_prime = self.dwconv_F2(F2)
-        Fa = self.attention_block_F1_F2(F3_prime, F2_prime)
-        # Step 4: F2 与 F3' 点乘得到 Fb
-        #F2_F3 = self.fc_F2_F3(F2)
-        #Fb = F2 * F1_prime +F2
-        Fb = F2 * F1_prime
-        # Step 5: 拼接 Fa 和 Fb
-        #fused_features = torch.cat([Fa, Fb], dim=1)
-        batch_size, channels, height, width = Fa.size()
-
-        # 创建一个新的张量来保存交替拼接后的结果
-        fused_features = torch.cat([Fa, Fb], dim=1)
-
-        # 使用直接的切片和索引操作交替放入 Fa 和 Fb 的通道
-        #fused_features[:, 0::2, :, :] = Fa  # Fa 的通道放入偶数位置
-        #fused_features[:, 1::2, :, :] = Fb  # Fb 的通道放入奇数位置
-        # Step 6: 最后的卷积操作
-        out = self.conv_out(fused_features)
-
-        out = out*(1-g1)+F2*g1
-        #out = self.conv_out(Fb)
-
-
-        return out
 class EncoderD2(nn.Module):
     def __init__(self, num_layers, pretrained, num_classes):
         super(EncoderD2, self).__init__()
@@ -1199,21 +2164,11 @@ class EncoderD3(nn.Module):
         self.d_s = Seg_f()
         self.d_e = Enh_f()
         self.d_d = Depth_f()
-        self.tsg = TSG(in_channels=512)
-        self.fe1 = FE1(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
-        self.fe2 = FE1(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
-        self.fe3 = FE1(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
-
+        self.tsg =TSG1(in_channels=512)
     def forward(self, x):
         self.features = []
 
         e1,e2,e3,e4,e5 = self.encoder(x)
-        e2_e = self.fe1(e1,e2,e3)
-        e3_e = self.fe2(e2,e3,e4)
-        e4_e = self.fe3(e3,e4,e5)
-        e2 = e2_e
-        e3 = e3_e
-        e4 = e4_e
         e5_e,e5_s,e5_d = self.tsg(e5)
         d_e = self.d_e(e1,e2,e3,e4,e5_e)
         #print(d_e.shape)
@@ -1230,6 +2185,418 @@ class EncoderD3(nn.Module):
 
 
         return self.features
+
+class EncoderD4(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD4, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f()
+        self.d_e = Enh_f()
+        self.d_d = Depth_f()
+        self.tsg =TSG1(in_channels=512)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        self.features = []
+        self.outputs ={}
+        e1,e2,e3,e4,e5 = self.encoder(x)
+        e5_e,e5_s,e5_d = self.tsg(e5)
+        d_e = self.d_e(e1,e2,e3,e4,e5_e)
+        #print(d_e.shape)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e = self.d_s(e1,e2,e3,e4,e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e = self.d_d(e1,e2,e3,e4,e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        #self.outputs["enh_f"] = self.d_e(x)
+        #self.outputs["s_f"] = self.d_s(x)
+        #self.outputs["d_f"] = self.d_d(x)
+
+
+        return self.features,self.outputs
+
+class EncoderD5(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD5, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f()
+        self.d_e = Enh_f()
+        self.d_d = Depth_f()
+        self.tsg =TSG1(in_channels=512)
+        self.fe1 = FE1(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = FE1(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = FE1(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        self.features = []
+        self.outputs ={}
+        e1,e2,e3,e4,e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e,e5_s,e5_d = self.tsg(e5)
+        d_e = self.d_e(e1,e2,e3,e4,e5_e)
+        #print(d_e.shape)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e = self.d_s(e1,e2,e3,e4,e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e = self.d_d(e1,e2,e3,e4,e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        #self.outputs["enh_f"] = self.d_e(x)
+        #self.outputs["s_f"] = self.d_s(x)
+        #self.outputs["d_f"] = self.d_d(x)
+
+
+        return self.features,self.outputs
+
+class EncoderD6(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD6, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+        self.tsg = TSG2(in_channels=512)
+        self.fe1 = FE2(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = FE2(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = FE2(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        self.features = []
+        self.outputs ={}
+        e1,e2,e3,e4,e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e,e5_s,e5_d = self.tsg(e5)
+        d_e,fe = self.d_e(e1,e2,e3,e4,e5_e)
+        #print(d_e.shape)
+        self.outputs["fe"] = fe
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e,fe = self.d_s(e1,e2,e3,e4,e5_s)
+        self.outputs["fs"] = fe
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e,fe = self.d_d(e1,e2,e3,e4,e5_d)
+        self.outputs["fd"] = fe
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        #self.outputs["enh_f"] = self.d_e(x)
+        #self.outputs["s_f"] = self.d_s(x)
+        #self.outputs["d_f"] = self.d_d(x)
+
+
+        return self.features,self.outputs
+
+
+class EncoderD7(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD7, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+        #self.tsg = TSG2(in_channels=512)
+        self.tsg = TSG3(in_channels=512)
+        self.fe1 = FE2(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = FE2(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = FE2(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5_e)
+        # print(d_e.shape)
+        self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5_s)
+        self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
+
+class EncoderD10(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD10, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+        #self.tsg = TSG2(in_channels=512)
+        self.fe1 = FE2(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = FE2(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = FE2(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        #self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        #self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        #self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        #e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5)
+        # print(d_e.shape)
+        #self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5)
+        #self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5)
+        #self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
+
+class EncoderD9(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD9, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+        self.tsg = TSG2(in_channels=512)
+        #self.fe1 = FE2(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        #self.fe2 = FE2(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        #self.fe3 = FE2(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        #e2_e = self.fe1(e1, e2, e3)
+        #e3_e = self.fe2(e2, e3, e4)
+        #e4_e = self.fe3(e3, e4, e5)
+        #e2 = e2_e
+        #e3 = e3_e
+        #e4 = e4_e
+        e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5_e)
+        # print(d_e.shape)
+        self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5_s)
+        self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
+class EncoderD8(nn.Module):
+    def __init__(self, num_layers, pretrained, num_classes):
+        super(EncoderD8, self).__init__()
+        # Decoder
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained)
+        self.d_s = Seg_f1()
+        self.d_e = Enh_f1()
+        self.d_d = Depth_f1()
+        self.tsg = TSG2(in_channels=512)
+        self.fe1 = FE2(in_channels_F1=64, in_channels_F2=64, in_channels_F3=128)
+        self.fe2 = FE2(in_channels_F1=64, in_channels_F2=128, in_channels_F3=256)
+        self.fe3 = FE2(in_channels_F1=128, in_channels_F2=256, in_channels_F3=512)
+        #self.pv1 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        #self.pv2 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        #self.pv3 = nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0)
+        self.e = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1),
+        )
+        self.s = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 6, kernel_size=3, stride=1, padding=1),
+        )
+        self.d = nn.Sequential(
+            # ConvBlock(64, 32, kernel_size=3, stride=1, padding=1),
+            # nn.Dropout2d(dropout),
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        self.features = []
+        self.outputs = {}
+        e1, e2, e3, e4, e5 = self.encoder(x)
+        e2_e = self.fe1(e1, e2, e3)
+        e3_e = self.fe2(e2, e3, e4)
+        e4_e = self.fe3(e3, e4, e5)
+        e2 = e2_e
+        e3 = e3_e
+        e4 = e4_e
+        e5_e, e5_s, e5_d = self.tsg(e5)
+        d_e, _ = self.d_e(e1, e2, e3, e4, e5_e)
+        # print(d_e.shape)
+        #self.outputs["fe"] = self.pv1(e5_e)
+        self.outputs["enh0"] = self.e(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_s(e1, e2, e3, e4, e5_s)
+        #self.outputs["fs"] = self.pv2(e5_s)
+        self.outputs["seg0"] = self.s(d_e)
+        self.features.append(d_e)
+        d_e, _ = self.d_d(e1, e2, e3, e4, e5_d)
+        #self.outputs["fd"] = self.pv3(e5_d)
+        self.features.append(d_e)
+        self.outputs[("disp0", 0)] = self.d(d_e)
+        # self.outputs["enh_f"] = self.d_e(x)
+        # self.outputs["s_f"] = self.d_s(x)
+        # self.outputs["d_f"] = self.d_d(x)
+
+        return self.features, self.outputs
 
 class EncoderD(nn.Module):
     def __init__(self, num_layers, pretrained, num_classes):
@@ -1559,6 +2926,17 @@ class DwConv(nn.Module):
         x = self.pointwise(x)
         return x
 
+class DwSConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
+        super(DwSConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, padding=padding,
+                                   groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
 
 
 # Transformer Attention Block

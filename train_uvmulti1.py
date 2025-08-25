@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from models.utils.metrics_seg_enh import EnhancementMetrics, StreamSegMetrics
 import numpy as np
 import random
-from option_uvmtnet import MonodepthOptions
+from option_uvmulti import MonodepthOptions
 
 splits_dir = os.path.join(os.path.dirname(__file__), "splits")
 options = MonodepthOptions()
@@ -498,7 +498,7 @@ class Trainer:
             mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
             if np.all(mask == False):
                 #print(f"Skipping image {i} because no valid depth values are within the range.")
-                continue  # 跳过当前循环，直接处理下一张图片
+                continue
             pred_depth = pred_depth[mask]
             gt_depth = gt_depth[mask]
 
@@ -531,75 +531,7 @@ class Trainer:
 
         return mean_errors[2], mean_errors[4], results_seg['mean_IoU'], results_enh['mean_PSNR']
 
-    def run_epoch_eval(self):
-        """Run a single epoch of evaluation
-        """
 
-        print("Evaluating")
-        MIN_DEPTH = self.opt.min_depth  # 1e-3
-        MAX_DEPTH = self.opt.max_depth  # 150,40
-
-        self.set_eval()
-        pred_depths = []
-        gt_depths = []
-        for batch_idx, inputs in enumerate(self.test_loader):
-            input_color = inputs[("color", 0, 0)].cuda()
-
-            if self.opt.post_process:
-                # Post-processed results require each image to have two forward passes
-                input_color = torch.cat((input_color, torch.flip(input_color, [3])), 0)
-
-            # output = self.models["depth"](self.models["encoder"](input_color))
-            feats1, _ = self.models["encoder"](input_color)
-
-            output = self.models["depth"](feats1)
-            _, pred_depth = disp_to_depth(output[("disp", 0)], self.opt.min_depth, self.opt.max_depth)
-            pred_depth = pred_depth[:, 0].cpu().detach().numpy()
-
-            gt_depths.append(inputs["depth_gt"].squeeze().cpu().detach().numpy())
-            pred_depths.append(pred_depth)
-
-        pred_depths = np.concatenate(pred_depths)
-
-        errors = []
-        ratios = []
-
-        for i in range(pred_depths.shape[0]):
-            gt_depth = gt_depths[i]
-            gt_height, gt_width = gt_depth.shape[:2]
-
-            pred_depth = pred_depths[i]
-
-            pred_depth = cv2.resize(pred_depth, (gt_width, gt_height))
-
-            mask = np.logical_and(gt_depth > MIN_DEPTH, gt_depth < MAX_DEPTH)
-            pred_depth = pred_depth[mask]
-            gt_depth = gt_depth[mask]
-
-            pred_depth *= self.opt.pred_depth_scale_factor
-
-            # print(pred_depth.max(), pred_depth.min())
-            if not self.opt.disable_median_scaling:
-                ratio = np.median(gt_depth) / np.median(pred_depth)
-                ratios.append(ratio)
-                pred_depth *= ratio
-
-            pred_depth[pred_depth < MIN_DEPTH] = MIN_DEPTH
-            pred_depth[pred_depth > MAX_DEPTH] = MAX_DEPTH
-
-            errors.append(compute_errors(gt_depth, pred_depth))
-        if not self.opt.disable_median_scaling:
-            ratios = np.array(ratios)
-            med = np.median(ratios)
-            print(" Scaling ratios | med: {:0.3f} | std: {:0.3f}".format(med, np.std(ratios / med)))
-
-        mean_errors = np.array(errors).mean(0)
-        print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
-        print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
-
-        self.set_train()
-
-        return mean_errors[2], mean_errors[4]
 
     def process_batch_multi(self, inputs):
         """Pass a minibatch through the network and generate images and losses
@@ -686,56 +618,6 @@ class Trainer:
 
         return outputs
 
-    def generate_images_pred_1(self, inputs, outputs):
-        """Generate the warped (reprojected) color images for a minibatch.
-        Generated images are saved into the `outputs` dictionary.
-        """
-        for scale in self.opt.scales:
-            disp = outputs[("disp_1", scale)]
-            if self.opt.v1_multiscale:
-                source_scale = scale
-            else:
-                disp = F.interpolate(
-                    disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=True)  # 改了
-                source_scale = 0
-                # depth = disp
-            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
-            # depth = disp
-            outputs[("depth_1", 0, scale)] = depth
-
-            for i, frame_id in enumerate(self.opt.frame_ids[1:]):
-
-                if frame_id == "s":
-                    T = inputs["stereo_T"]
-                else:
-                    T = outputs[("cam_T_cam", 0, frame_id)]
-
-                # from the authors of https://arxiv.org/abs/1712.00175
-                if self.opt.pose_model_type == "posecnn":
-                    axisangle = outputs[("axisangle", 0, frame_id)]
-                    translation = outputs[("translation", 0, frame_id)]
-
-                    inv_depth = 1 / depth
-                    mean_inv_depth = inv_depth.mean(3, True).mean(2, True)
-
-                    T = transformation_from_parameters(
-                        axisangle[:, 0], translation[:, 0] * mean_inv_depth[:, 0], frame_id < 0)
-
-                cam_points = self.backproject_depth[source_scale](
-                    depth, inputs[("inv_K", source_scale)])
-                pix_coords = self.project_3d[source_scale](
-                    cam_points, inputs[("K", source_scale)], T)
-
-                outputs[("sample", frame_id, scale)] = pix_coords
-
-                outputs[("color_1", frame_id, scale)] = F.grid_sample(
-                    inputs[("color", frame_id, source_scale)],
-                    outputs[("sample", frame_id, scale)],
-                    padding_mode="border", align_corners=True)
-
-                if not self.opt.disable_automasking:
-                    outputs[("color_identity_1", frame_id, scale)] = \
-                        inputs[("color", frame_id, source_scale)]
 
     def generate_images_pred(self, inputs, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
@@ -1072,49 +954,7 @@ class Trainer:
 
         self.set_train()
 
-    def process_batch_val(self, inputs):
-        """Pass a minibatch through the network and generate images and losses
-        """
-        for key, ipt in inputs.items():
-            inputs[key] = ipt.to(self.device)
-        outputs = self.models["depth"](inputs["color_aug", 0, 0])
 
-        if self.use_pose_net:
-            outputs.update(self.predict_poses(inputs, outputs))
-
-        self.generate_images_pred(inputs, outputs)
-        losses = self.compute_losses_val(inputs, outputs)
-
-        return outputs, losses
-
-    def compute_losses_val(self, inputs, outputs):
-        """Compute the reprojection, perception_loss and smoothness losses for a minibatch
-        """
-        losses = {}
-        total_loss = 0
-
-        for scale in self.opt.scales:
-
-            loss = 0
-            registration_losses = []
-
-            target = inputs[("color", 0, 0)]
-
-            for frame_id in self.opt.frame_ids[1:]:
-                registration_losses.append(
-                    ncc_loss(outputs[("registration", scale, frame_id)].mean(1, True), target.mean(1, True)))
-
-            registration_losses = torch.cat(registration_losses, 1)
-            registration_losses, idxs_registration = torch.min(registration_losses, dim=1)
-
-            loss += registration_losses.mean()
-            total_loss += loss
-            losses["loss/{}".format(scale)] = loss
-
-        total_loss /= self.num_scales
-        losses["loss"] = -1 * total_loss
-
-        return losses
 
     def log_time(self, batch_idx, duration, loss,loss_seg,loss_enh):
         """Print a logging statement to the terminal
@@ -1209,13 +1049,6 @@ class Trainer:
             model_dict.update(pretrained_dict)
             self.models[n].load_state_dict(model_dict)
 
-        # loading adam state
-        # optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
-        # if os.path.isfile(optimizer_load_path):
-        # print("Loading Adam weights")
-        # optimizer_dict = torch.load(optimizer_load_path)
-        # self.model_optimizer.load_state_dict(optimizer_dict)
-        # else:
         print("Adam is randomly initialized")
 
 
