@@ -9,7 +9,7 @@ from datasets.benthic_dataset_multitask2 import BenthicDataset
 from models.resnet_encoder import ResnetEncoder
 from datasets.benthic_dataset_multitask_cz import BenthicDataset_CZ
 from models.depth_decoder import DepthDecoder
-from models.UVMTNet import PoseDecoder, SegDecoder_f, EnhDecoder_f, Depth_h_bins, Seg_h, Depth_h, Enh_h, EncoderD4,EncoderD5,EncoderD6,EncoderD7
+from models.UVMulti import PoseDecoder, SegDecoder_f, EnhDecoder_f, Depth_h_bins, Seg_h, Depth_h, Enh_h, EncoderD4,EncoderD5,EncoderD6,EncoderD7
 from models.monodepth_layers import SSIM, BackprojectDepth, Project3D, disp_to_depth, compute_errors, \
     transformation_from_parameters, get_smooth_loss, sec_to_hm_str, normalize_image
 from models.utils.loss import BDiceLoss_sup, BceLoss1_sup,SCRLoss,FCDLoss
